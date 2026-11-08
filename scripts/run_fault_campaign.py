@@ -179,11 +179,18 @@ def main():
                              "accuracy": round(sum(r["correct"] for r in group) / len(group), 4) if group else None}
     fault_results = [r for r in results if r["family"] != "HEALTHY_CONTROL"]
     control_results = [r for r in results if r["family"] == "HEALTHY_CONTROL"]
+    repo_root = Path(__file__).resolve().parents[1]
+    try:
+        results_path = output.resolve().relative_to(repo_root).as_posix()
+    except ValueError:
+        # Never write an absolute local path (which may contain a username) into
+        # a report. For output outside the repository, retain only its filename.
+        results_path = output.name
     summary = {"runs": len(results), "fault_runs": len(fault_results), "faults_detected_correctly": sum(r["correct"] for r in fault_results),
                "fault_detection_rate": round(sum(r["correct"] for r in fault_results) / len(fault_results), 4),
                "healthy_controls": len(control_results), "healthy_false_positive_rate": round(sum(r["detected"] != "UNKNOWN" for r in control_results) / len(control_results), 4),
                "qwen_runs": sum(r["model"] == "qwen3:4b" for r in results), "by_family": by_family,
-               "results_file": str(output.resolve())}
+               "results_file": results_path}
     summary_path = output.with_suffix(".summary.json")
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2), flush=True)

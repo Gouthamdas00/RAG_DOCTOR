@@ -23,6 +23,3 @@ node_modules/
 **/node_modules/
 dist/
 build/
-
-# Accidental empty file in the extension folder
-/vscode-extension/,

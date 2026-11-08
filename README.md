@@ -12,6 +12,10 @@ RAG Doctor is a local-first diagnostic tool for Retrieval-Augmented Generation (
 
 RAG Doctor cannot generically see another process's in-memory retriever results. If its observer does not support an app's client or framework, retrieval details may be unavailable. The report should identify that as an observability gap rather than claim retrieval failed. Findings are evidence-limited and suggestions require engineer review.
 
+## Current evaluation evidence
+
+The checked-in synthetic fault campaign contains 700 seeded fault variants and 100 healthy controls. Its deterministic checks detected the seeded patterns in that campaign, with no false positives on those controls; only 9 runs used the live Qwen model. These results test known rule patterns and are **not a real-world accuracy claim**. RAG Doctor still needs a human-labeled, held-out benchmark across independent RAG applications before reporting production accuracy.
+
 ## Get started
 
 1. Install Python and VS Code.
