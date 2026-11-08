@@ -41,6 +41,7 @@ class WorkspaceASTInspector:
     def scan_workspace(self, workspace_dir: str) -> Dict[str, Any]:
         root = Path(workspace_dir).resolve()
         code_findings: List[Dict[str, Any]] = []
+        logic_warnings: List[Dict[str, Any]] = []
         detected_knobs: Dict[str, Any] = {}
         dataset_files: List[Dict[str, Any]] = []
         evaluation_cases: List[Dict[str, Any]] = []
@@ -56,6 +57,7 @@ class WorkspaceASTInspector:
                 if code_file.suffix.lower() == ".py":
                     tree = ast.parse(source, filename=str(code_file))
                     self._extract_ast_knobs(tree, rel_path, lines, code_findings, detected_knobs)
+                    logic_warnings.extend(self._find_chunk_step_warnings(tree, rel_path, lines))
                 else:
                     self._extract_text_knobs(rel_path, lines, code_findings, detected_knobs)
                 network_locations.extend(self._find_network_calls(rel_path, lines))
@@ -136,7 +138,7 @@ class WorkspaceASTInspector:
             "dataset_summary": dataset_files,
             "evaluation_cases": evaluation_cases[:200],
             "evaluation_case_count": len(evaluation_cases),
-            "static_warnings": self._correlate_code_and_data(code_findings, dataset_files),
+            "static_warnings": logic_warnings + self._correlate_code_and_data(code_findings, dataset_files),
             "potential_data_transfer_locations": network_locations[:100],
             "pipeline_locations": pipeline_locations[:200],
             "scan_limits": {"code_files": len(code_files), "max_file_bytes": 1000000},
@@ -288,7 +290,11 @@ class WorkspaceASTInspector:
                 if not isinstance(value_node, ast.Constant) or not isinstance(value_node.value, (int, float)) or isinstance(value_node.value, bool):
                     continue
                 for target in targets:
-                    if not isinstance(target, ast.Name) or target.id.lower() not in self.TARGET_KNOBS:
+                    if not isinstance(target, ast.Name):
+                        continue
+                    normalized_name = target.id.lower()
+                    param_name = "top_k" if normalized_name.startswith("top_k_") else normalized_name
+                    if param_name not in self.TARGET_KNOBS:
                         continue
                     line_no = node.lineno
                     snippet = (
@@ -296,7 +302,6 @@ class WorkspaceASTInspector:
                         if 0 < line_no <= len(lines)
                         else ""
                     )
-                    param_name = target.id.lower()
                     entry = {
                         "parameter": param_name,
                         "value": value_node.value,
@@ -307,6 +312,58 @@ class WorkspaceASTInspector:
                     }
                     findings.append(entry)
                     detected_knobs[param_name] = entry
+
+    @staticmethod
+    def _find_chunk_step_warnings(
+        tree: ast.AST,
+        rel_path: Path,
+        lines: List[str],
+    ) -> List[Dict[str, Any]]:
+        """Find common chunkers that configure overlap but advance by full size."""
+        warnings: List[Dict[str, Any]] = []
+        for class_node in (node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)):
+            has_overlap_setting = any(
+                isinstance(node, ast.Attribute) and node.attr.lower() in {"chunk_overlap", "overlap"}
+                or isinstance(node, ast.Name) and node.id.lower() in {"chunk_overlap", "overlap"}
+                for node in ast.walk(class_node)
+            )
+            if not has_overlap_setting:
+                continue
+            for function in (node for node in class_node.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
+                for statement in ast.walk(function):
+                    if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                        continue
+                    value = statement.value
+                    targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+                    target_names = [target.id for target in targets if isinstance(target, ast.Name)]
+                    if not target_names or not (
+                        isinstance(value, ast.Name) and value.id.lower() == "chunk_size"
+                        or isinstance(value, ast.Attribute) and value.attr.lower() == "chunk_size"
+                    ):
+                        continue
+                    step_name = target_names[0]
+                    advances_cursor = any(
+                        isinstance(node, ast.AugAssign)
+                        and isinstance(node.op, ast.Add)
+                        and isinstance(node.target, ast.Name)
+                        and isinstance(node.value, ast.Name)
+                        and node.value.id == step_name
+                        for node in ast.walk(function)
+                    )
+                    if not advances_cursor:
+                        continue
+                    line_no = statement.lineno
+                    snippet = lines[line_no - 1].strip()[:500] if 0 < line_no <= len(lines) else ""
+                    warnings.append({
+                        "severity": "MEDIUM",
+                        "root_cause": FailureLabel.CHUNKING.value,
+                        "file": str(rel_path),
+                        "line": line_no,
+                        "code_snippet": SecurityGuard.sanitize_text(snippet),
+                        "problem": f"`{step_name}` advances by the full chunk size at {rel_path}:{line_no}, so the configured overlap is not applied between chunks.",
+                        "fix_suggestion": "Advance by `max(1, chunk_size - chunk_overlap)` (or the equivalent instance fields), then confirm the labeled answer span is preserved in an indexed chunk.",
+                    })
+        return warnings
 
     def _correlate_code_and_data(
         self, code_findings: List[Dict[str, Any]], dataset_files: List[Dict[str, Any]]
@@ -357,6 +414,18 @@ class WorkspaceASTInspector:
                         "code_snippet": item["code_snippet"],
                         "problem": f"`{param}=1` at {item['file']}:{item['line']} drops any relevant chunk ranked #2 or #3 before prompt assembly.",
                         "fix_suggestion": f"Increase `{param}` from `1` to `3`.",
+                    }
+                )
+            if param in {"top_k", "top_k_final", "top_n_candidates"} and isinstance(val, (int, float)) and val <= 0:
+                warnings.append(
+                    {
+                        "severity": "CRITICAL",
+                        "root_cause": FailureLabel.RETRIEVAL.value,
+                        "file": item["file"],
+                        "line": item["line"],
+                        "code_snippet": item["code_snippet"],
+                        "problem": f"`{param}={val}` at {item['file']}:{item['line']} is non-positive and can prevent retrieval from returning candidates.",
+                        "fix_suggestion": f"Set `{param}` to a positive value. Use `1` only as the minimum valid value, then tune on labeled queries.",
                     }
                 )
         return warnings

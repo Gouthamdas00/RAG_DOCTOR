@@ -458,6 +458,7 @@ class RagDoctorViewProvider {
     const result = comparison.metrics || {};
     const paired = Number(result.pairedCount) || 0;
     const score = (before, after) => paired ? `${before}/${paired} → ${after}/${paired}` : 'unavailable; no paired cases';
+    const referenceOverlap = `${Number(result.beforeReferenceObserved) || 0}/${Number(result.beforeReferenceAssessed) || 0} → ${Number(result.afterReferenceObserved) || 0}/${Number(result.afterReferenceAssessed) || 0}`;
     const latency = (value) => Number.isFinite(value) ? `${value.toFixed(1)} ms` : 'unavailable';
     const sourceDescription = {
       changed: 'Tracked source/config files changed between runs.',
@@ -466,7 +467,7 @@ class RagDoctorViewProvider {
       unavailable: 'A complete source comparison was unavailable.',
     }[result.sourceChange] || 'Source change status unavailable.';
     const cases = (result.cases || []).map((item) => `<li>${escape(item.caseId)}: ${escape(item.beforeCause)} → ${escape(item.afterCause)}${item.supportChanged ? ' · answer-support status changed' : ''}${item.goldChanged ? ' · labeled-document presence changed' : ''}</li>`).join('');
-    return `<section class="case"><h2>Repeatable run comparison</h2><p>${paired} case(s) paired across the previous ${result.beforeCapturedCases}/${result.beforeTotalCases} and current ${result.afterCapturedCases}/${result.afterTotalCases} captured suites.</p><p>Reference-supported outcomes (current evaluator): ${escape(score(result.beforeSupported, result.afterSupported))}.</p><p>Labeled source-document presence: ${escape(score(result.beforeGold, result.afterGold))}.</p><p>Mean app-reported latency: ${escape(latency(result.beforeLatencyMs))} → ${escape(latency(result.afterLatencyMs))}.</p><p>${escape(sourceDescription)} ${escape(coverage)}</p>${cases ? `<details><summary>Per-case changes</summary><ul>${cases}</ul></details>` : ''}<p>This comparison measures the same labeled case IDs; it does not prove a code change caused the outcome. Model/provider variance may affect answers.</p></section>`;
+    return `<section class="case"><h2>Repeatable run comparison</h2><p>${paired} case(s) paired across the previous ${result.beforeCapturedCases}/${result.beforeTotalCases} and current ${result.afterCapturedCases}/${result.afterTotalCases} captured suites.</p><p>Reference-supported outcomes (requires answer and context evidence): ${escape(score(result.beforeSupported, result.afterSupported))}.</p><p>Labeled number/phrase observed in answer (limited check; not proof of correctness): ${escape(referenceOverlap)}.</p><p>Labeled source-document presence: ${escape(score(result.beforeGold, result.afterGold))}.</p><p>Mean app-reported latency: ${escape(latency(result.beforeLatencyMs))} → ${escape(latency(result.afterLatencyMs))}.</p><p>${escape(sourceDescription)} ${escape(coverage)}</p>${cases ? `<details><summary>Per-case changes</summary><ul>${cases}</ul></details>` : ''}<p>This comparison measures the same labeled case IDs; it does not prove a code change caused the outcome. Model/provider variance may affect answers.</p></section>`;
   }
 
   showEvaluationReport(folder, results, comparison = null) {
@@ -486,11 +487,24 @@ class RagDoctorViewProvider {
       const summary = diagnosis
         ? `${diagnosis.root_cause || 'INSUFFICIENT_EVIDENCE'} · ${diagnosis.finding_label || diagnosis.status} · ${diagnosis.evidence_level} evidence`
         : `Not evaluated · ${item.error || 'No result'}`;
-      const codeRefs = diagnosis ? (diagnosis.code_references || []).map((ref) => `<li><button class="loc" data-open="1" data-file="${escape(ref.file)}" data-line="${Number(ref.line) || 1}">Open ${escape(ref.file)}:${Number(ref.line) || 1}</button><p>${escape(ref.label)}</p><pre>${escape(ref.code_snippet || '')}</pre></li>`).join('') : '';
-      const arithmeticBlock = diagnosis && diagnosis.arithmetic_checks && diagnosis.arithmetic_checks.length
+      const codeRefs = diagnosis ? (diagnosis.code_references || []).map((ref) => {
+        const matchType = {
+          static_rule: 'Static rule match',
+          runtime_score_order: 'Runtime-correlated candidate',
+          related_call_site: 'Related pipeline call site',
+          parameter_location: 'Parameter location',
+        }[ref.match_type] || 'Code location';
+        return `<li><p><b>${escape(matchType)}</b></p><button class="loc" data-open="1" data-file="${escape(ref.file)}" data-line="${Number(ref.line) || 1}">Open ${escape(ref.file)}:${Number(ref.line) || 1}</button><p>${escape(ref.label)}</p><pre>${escape(ref.code_snippet || '')}</pre></li>`;
+      }).join('') : '';
+      const arithmeticBlock = `${diagnosis && diagnosis.arithmetic_checks && diagnosis.arithmetic_checks.length
         ? `<section><h3>Deterministic arithmetic verification</h3><ul>${diagnosis.arithmetic_checks.map((check) => `<li><code>${escape(check.expression)}</code> computes to <b>${escape(check.computed)}</b>; the response states <b>${escape(check.reported)}</b>.</li>`).join('')}</ul></section>`
+        : ''}${diagnosis && Array.isArray(diagnosis.security_findings) && diagnosis.security_findings.length
+        ? `<section><h3>Security signals</h3><ul>${diagnosis.security_findings.map((item) => `<li><b>${escape(item.label || item.code || 'Potential security issue')}</b>: ${escape(item.explanation || '')}</li>`).join('')}</ul></section>`
+        : ''}`;
+      const providerCallBlock = diagnosis && diagnosis.provider_call && diagnosis.provider_call.status === 'failed'
+        ? `<section><h3>Model provider call</h3><p>Observed failure: ${escape(diagnosis.provider_call.provider || 'provider')} ${escape(diagnosis.provider_call.model || '')} · ${escape(diagnosis.provider_call.error || 'request failed')}.</p><p>This is separate from retrieval diagnosis. The app may return a fallback answer; check its response mode because HTTP 200 from the app does not prove the model-provider call succeeded.</p></section>`
         : '';
-      const details = diagnosis ? `<p>${escape(diagnosis.explanation)}</p><p><b>Suggested next step:</b> ${escape(diagnosis.recommended_fix)}</p>${arithmeticBlock}${codeRefs ? `<section><h3>Relevant code and experiments</h3><ol>${codeRefs}</ol><p>These locations are static matches to the diagnosed or uncertain pipeline stage. Confirm the highlighted code is used by this run before editing it.</p></section>` : '<p>No matching code location was found. RAG Doctor will not invent a file or line.</p>'}<button class="investigate" data-investigate="${results.indexOf(item)}">Investigate with local AI</button><pre class="investigation" id="investigation-${results.indexOf(item)}" hidden></pre><button class="verify" data-track-fix="${results.indexOf(item)}" hidden>Track this exact fix</button><pre id="fix-tracking-${results.indexOf(item)}" hidden></pre><details><summary>Run evidence</summary><p><b>Expected:</b> ${escape(test.expected_answer)}</p><p><b>Actual:</b> ${escape(diagnosis.llm_answer)}</p><p><b>Prompt:</b><pre>${escape(diagnosis.prompt)}</pre></p><p><b>Retrieved passages:</b>${(diagnosis.retrieved_chunks || []).map((chunk) => `<pre>#${escape(chunk.final_rank)} ${escape(chunk.doc_id || '')}\n${escape(chunk.text)}</pre>`).join('')}</p><p><b>Evidence:</b> ${escape((diagnosis.evidence || []).join(' · '))}</p></details>` : `<p>${escape(item.error || '')}</p>`;
+      const details = diagnosis ? `<p>${escape(diagnosis.explanation)}</p><p><b>Suggested next step:</b> ${escape(diagnosis.recommended_fix)}</p>${providerCallBlock}${arithmeticBlock}${codeRefs ? `<section><h3>Relevant code and experiments</h3><ol>${codeRefs}</ol><p>Each location is labeled as a static rule match, runtime-correlated candidate, parameter location, or related call site. Confirm it is used by this run before editing.</p></section>` : '<p>No matching code location was found. RAG Doctor will not invent a file or line.</p>'}<button class="investigate" data-investigate="${results.indexOf(item)}">Investigate with local AI</button><pre class="investigation" id="investigation-${results.indexOf(item)}" hidden></pre><button class="verify" data-track-fix="${results.indexOf(item)}" hidden>Track this exact fix</button><pre id="fix-tracking-${results.indexOf(item)}" hidden></pre><details><summary>Run evidence</summary><p><b>Expected:</b> ${escape(test.expected_answer)}</p><p><b>Actual:</b> ${escape(diagnosis.llm_answer)}</p><p><b>Prompt:</b><pre>${escape(diagnosis.prompt)}</pre></p><p><b>Retrieved passages:</b>${(diagnosis.retrieved_chunks || []).map((chunk) => `<pre>#${escape(chunk.final_rank)} ${escape(chunk.doc_id || '')}\n${escape(chunk.text)}</pre>`).join('')}</p><p><b>Evidence:</b> ${escape((diagnosis.evidence || []).join(' · '))}</p></details>` : `<p>${escape(item.error || '')}</p>`;
       const verifyButton = diagnosis && item.replay && Number.isInteger(item.replay.requestBody.top_k)
         ? `<button class="verify" data-verify="${results.indexOf(item)}" hidden>Run verified experiment</button>`
         : '';
@@ -1090,7 +1104,8 @@ class RagDoctorViewProvider {
     }[metrics.sourceChange] || 'Source change status is unavailable.';
     const lines = [
       `Post-change replay: ${paired}/${beforeCases.length} labeled case(s) paired.`,
-      `Reference-supported outcomes: ${ratio(metrics.beforeSupported, metrics.afterSupported)}.`,
+      `Reference-supported outcomes (requires answer and context evidence): ${ratio(metrics.beforeSupported, metrics.afterSupported)}.`,
+      `Labeled number/phrase observed in answer (limited check; not proof of correctness): ${Number(metrics.beforeReferenceObserved) || 0}/${Number(metrics.beforeReferenceAssessed) || 0} → ${Number(metrics.afterReferenceObserved) || 0}/${Number(metrics.afterReferenceAssessed) || 0}.`,
       `Gold source-document presence: ${ratio(metrics.beforeGold, metrics.afterGold)}.`,
       `Mean app-reported latency: ${latency(metrics.beforeLatencyMs)} → ${latency(metrics.afterLatencyMs)}.`,
       sourceChange,
@@ -1443,6 +1458,7 @@ function render(results){
     else{
       const d=card(diagnosis.root_cause||'INSUFFICIENT_EVIDENCE');
       d.appendChild(el('div','tag',(diagnosis.status||'diagnosis')+' · '+(diagnosis.evidence_level||'limited')+' evidence · '+(diagnosis.source||'unknown source')));
+      if(Array.isArray(diagnosis.security_findings)&&diagnosis.security_findings.length){diagnosis.security_findings.forEach(item=>d.appendChild(el('div','meta',(item.label||item.code||'Potential security issue')+': '+(item.explanation||''))))}
       if(diagnosis.prompt_response_excluded)d.appendChild(el('div','meta','Privacy mode: prompt and response excluded.'));
       if(diagnosis.retrieved_text_included)d.appendChild(el('div','meta','Retrieved passage text was included in this local, memory-only diagnosis.'));
       else if(diagnosis.content_excluded)d.appendChild(el('div','meta','Retrieved passage text was excluded; only retrieval metadata is available.'));
@@ -1453,6 +1469,8 @@ function render(results){
       if(diagnosis.recommended_fix){const fix=el('div','fix');fix.appendChild(el('b','','Suggested change'));fix.appendChild(el('div','text',diagnosis.recommended_fix));d.appendChild(fix)}
       if(diagnosis.source_location&&diagnosis.source_location.file)d.appendChild(locButton(result,diagnosis.source_location.file,diagnosis.source_location.line,'Open related code location'));
       if(diagnosis.source_location_note)d.appendChild(el('div','meta',diagnosis.source_location_note));
+      if(Array.isArray(diagnosis.code_references)&&diagnosis.code_references.length){const det=el('details');det.appendChild(el('summary','','Code locations to inspect'));diagnosis.code_references.forEach(ref=>{const kind=ref.match_type==='static_rule'?'Static rule match':ref.match_type==='related_call_site'?'Related pipeline call':ref.match_type==='runtime_score_order'?'Runtime-correlated candidate':'Parameter location';if(ref.file)det.appendChild(locButton(result,ref.file,ref.line,'Open '+kind+': '+ref.file+':'+ref.line));det.appendChild(el('div','text',ref.label||''));if(ref.code_snippet)det.appendChild(el('pre','text',ref.code_snippet))});d.appendChild(det)}
+      if(Array.isArray(diagnosis.related_code_locations)&&diagnosis.related_code_locations.length){const det=el('details');det.appendChild(el('summary','','Related pipeline call sites (not verified as the cause)'));diagnosis.related_code_locations.forEach(ref=>{det.appendChild(locButton(result,ref.file,ref.line,'Open related '+ref.component+' call: '+ref.file+':'+ref.line));if(ref.code_snippet)det.appendChild(el('pre','text',ref.code_snippet))});d.appendChild(det)}
       if(diagnosis.log_location)d.appendChild(locButton(result,diagnosis.log_location.file,diagnosis.log_location.line,'Open source log event'));
       if(diagnosis.retrieval_observed!==null&&diagnosis.retrieval_observed!==undefined)d.appendChild(el('div','meta','Retrieval observed: '+(diagnosis.retrieval_observed?'yes':'no')+(diagnosis.retrieval_count!==undefined?' · candidates: '+diagnosis.retrieval_count:'')));
       if(diagnosis.metadata&&Object.keys(diagnosis.metadata).length){const det=el('details');det.appendChild(el('summary','','Runtime trace metadata'));const pre=el('pre','text',JSON.stringify(diagnosis.metadata,null,2));det.appendChild(pre);d.appendChild(det)}

@@ -1,5 +1,6 @@
 ﻿from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import ast
 import json
 import os
 import re
@@ -30,7 +31,7 @@ from backend.app.schemas.contracts import (
 )
 from backend.app.tuner.optimizer import ParetoAutoTuner
 
-app = FastAPI(title="RAG Doctor — Local IDE Diagnostic & Code Inspector", version="2.4.64")
+app = FastAPI(title="RAG Doctor — Local IDE Diagnostic & Code Inspector", version="2.4.68")
 
 # Latest run per workspace, retained only in this local process's RAM.
 VOLATILE_EXTERNAL_RUNS: Dict[str, Dict[str, Any]] = {}
@@ -235,18 +236,25 @@ def _normalized_numeric_values(value: Any) -> List[str]:
     return values
 
 
-def _code_references_for_diagnosis(workspace: Path, diagnosis: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _code_references_for_diagnosis(
+    workspace: Path,
+    diagnosis: Dict[str, Any],
+    scanned_report: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     """Attach bounded, workspace-relative code locations to a live finding."""
-    key = str(workspace)
-    now = time.monotonic()
-    cached = WORKSPACE_CODE_REPORTS.get(key)
-    if cached and now - cached[0] < 30:
-        report = cached[1]
+    if scanned_report is not None:
+        report = scanned_report
     else:
-        report = AST_INSPECTOR.scan_workspace(key)
-        WORKSPACE_CODE_REPORTS[key] = (now, report)
-        while len(WORKSPACE_CODE_REPORTS) > 16:
-            WORKSPACE_CODE_REPORTS.pop(next(iter(WORKSPACE_CODE_REPORTS)))
+        key = str(workspace)
+        now = time.monotonic()
+        cached = WORKSPACE_CODE_REPORTS.get(key)
+        if cached and now - cached[0] < 30:
+            report = cached[1]
+        else:
+            report = AST_INSPECTOR.scan_workspace(key)
+            WORKSPACE_CODE_REPORTS[key] = (now, report)
+            while len(WORKSPACE_CODE_REPORTS) > 16:
+                WORKSPACE_CODE_REPORTS.pop(next(iter(WORKSPACE_CODE_REPORTS)))
 
     root_cause = diagnosis.get("root_cause")
     status = diagnosis.get("status")
@@ -291,11 +299,16 @@ def _code_references_for_diagnosis(workspace: Path, diagnosis: Dict[str, Any]) -
     for warning in warnings:
         refs.append({
             "kind": "configuration_finding",
+            "match_type": "static_rule",
             "file": warning.get("file"),
             "line": warning.get("line"),
             "label": f"{warning.get('problem', 'Detected configuration finding')} Suggested experiment: {warning.get('fix_suggestion', 'review this setting on a labeled case.')}",
             "code_snippet": warning.get("code_snippet", ""),
         })
+
+    rerank_sort_reference = _runtime_correlated_reranker_sort(workspace, diagnosis)
+    if rerank_sort_reference:
+        refs.append(rerank_sort_reference)
 
     locations = report.get("code_locations", [])
     for component in components:
@@ -319,6 +332,7 @@ def _code_references_for_diagnosis(workspace: Path, diagnosis: Dict[str, Any]) -
                     label = f"Detected `{parameter}={value}` in {knob.get('call', 'configuration')} code. Use this as the baseline for a one-variable A/B run; keep the change only if the labeled case improves without unacceptable latency or token cost."
                 refs.append({
                     "kind": "parameter",
+                    "match_type": "parameter_location",
                     "parameter": parameter,
                     "value": value,
                     "file": knob.get("file"),
@@ -352,6 +366,7 @@ def _code_references_for_diagnosis(workspace: Path, diagnosis: Dict[str, Any]) -
                 label = f"Inspect this {component} call against the captured run evidence before changing its configuration."
             refs.append({
                 "kind": "pipeline_call",
+                "match_type": "related_call_site",
                 "component": component,
                 "file": location.get("file"),
                 "line": location.get("line"),
@@ -374,6 +389,89 @@ def _code_references_for_diagnosis(workspace: Path, diagnosis: Dict[str, Any]) -
         if len(deduped) == 4:
             break
     return deduped
+
+
+def _runtime_correlated_reranker_sort(workspace: Path, diagnosis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Locate an ascending score sort only when the captured rank trace agrees with it."""
+    if diagnosis.get("root_cause") != "RERANKER":
+        return None
+    chunks = [chunk for chunk in diagnosis.get("retrieved_chunks", []) if isinstance(chunk, dict)]
+    scored = [
+        chunk for chunk in chunks
+        if isinstance(chunk.get("rerank_score"), (int, float))
+        and not isinstance(chunk.get("rerank_score"), bool)
+        and isinstance(chunk.get("final_rank", chunk.get("rank")), int)
+    ]
+    if len(scored) < 2:
+        return None
+    scored.sort(key=lambda chunk: int(chunk.get("final_rank", chunk.get("rank", 0))))
+    scores = [float(chunk["rerank_score"]) for chunk in scored]
+    if not (scores[0] < scores[-1] and all(left <= right for left, right in zip(scores, scores[1:]))):
+        return None
+
+    expected = str(diagnosis.get("expected_answer") or "").strip().lower()
+    top_k = (diagnosis.get("runtime_parameters") or {}).get("top_k_final")
+    if not isinstance(top_k, int):
+        top_k = diagnosis.get("top_k_final")
+    if not isinstance(top_k, int) or not expected:
+        return None
+    gold = next((chunk for chunk in scored if expected in str(chunk.get("text") or "").lower()), None)
+    if not gold:
+        return None
+    final_rank = int(gold.get("final_rank", gold.get("rank", 0)))
+    pre_rank = gold.get("pre_rerank_rank")
+    if not isinstance(pre_rank, int) or pre_rank > top_k or final_rank <= top_k:
+        return None
+
+    for source_path in AST_INSPECTOR._iter_files(workspace, {".py"}, 400):
+        if "rerank" not in str(source_path).lower():
+            continue
+        try:
+            source = source_path.read_text(encoding="utf-8-sig", errors="replace")
+            tree = ast.parse(source, filename=str(source_path))
+            lines = source.splitlines()
+        except (OSError, SyntaxError, ValueError):
+            continue
+        for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
+            is_sort = isinstance(call.func, ast.Attribute) and call.func.attr == "sort"
+            is_sorted = isinstance(call.func, ast.Name) and call.func.id == "sorted"
+            if not (is_sort or is_sorted):
+                continue
+            reverse = next((keyword.value for keyword in call.keywords if keyword.arg == "reverse"), None)
+            if reverse is not None and not (isinstance(reverse, ast.Constant) and reverse.value is False):
+                continue
+            key = next((keyword.value for keyword in call.keywords if keyword.arg == "key"), None)
+            if key is None or not _sort_key_looks_score_related(key):
+                continue
+            line_no = call.lineno
+            return {
+                "kind": "runtime_correlated_candidate",
+                "match_type": "runtime_score_order",
+                "file": str(source_path.relative_to(workspace)),
+                "line": line_no,
+                "label": "Captured ranks increase with rerank_score while the expected passage was demoted. Review this ascending sort and confirm whether higher scores should rank first before changing its direction.",
+                "code_snippet": lines[line_no - 1].strip()[:500] if 0 < line_no <= len(lines) else "",
+            }
+    return None
+
+
+def _sort_key_looks_score_related(key: ast.AST) -> bool:
+    """Accept recognizable score keys, not every ascending sort in a reranker file."""
+    score_names = {"score", "scores", "rerank_score", "relevance_score", "similarity_score"}
+    for node in ast.walk(key):
+        if isinstance(node, ast.Name) and node.id.lower() in score_names:
+            return True
+        if isinstance(node, ast.Attribute) and node.attr.lower() in score_names:
+            return True
+        # Common `(document, score)` lists are sorted by tuple index 1.
+        if isinstance(node, ast.Subscript):
+            slice_node = node.slice
+            if isinstance(slice_node, ast.Constant) and slice_node.value == 1:
+                return True
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "itemgetter":
+            if any(isinstance(arg, ast.Constant) and arg.value == 1 for arg in node.args):
+                return True
+    return False
 
 
 def build_default_workspace() -> Tuple[List[Document], List[BenchmarkItem]]:
@@ -686,10 +784,24 @@ def analyze_workspace(workspace_path: str = Query(...), include_content: bool = 
         }
         source = "local_log"
 
+    if run:
+        security_audit = run.get("security_audit") if isinstance(run.get("security_audit"), dict) else {}
+        if "prompt_injection_detected" not in security_audit:
+            captured_text = str(run.get("prompt") or "") + "\n" + "\n".join(
+                str(chunk.get("text") or "")
+                for chunk in run.get("retrieved_chunks", [])
+                if isinstance(chunk, dict)
+            )
+            security_audit = {
+                **security_audit,
+                "prompt_injection_detected": SecurityGuard.scan_for_prompt_injection(captured_text)["injection_detected"],
+            }
+            run["security_audit"] = security_audit
     diagnosis = diagnose_live_run(run, ast_report["static_warnings"]) if run else None
     if diagnosis:
         diagnosis["source"] = source
         diagnosis["data_transfer_events"] = run.get("data_transfer_events", [])
+        diagnosis["top_k_final"] = run.get("top_k_final")
         if not diagnosis.get("source_location"):
             component = {
                 "CHUNKING": "chunking",
@@ -700,10 +812,13 @@ def analyze_workspace(workspace_path: str = Query(...), include_content: bool = 
                 "GENERATOR": "generation",
                 "ABSTENTION": "generation",
             }.get(diagnosis.get("root_cause"))
-            location = next((item for item in ast_report.get("pipeline_locations", []) if item.get("component") == component), None)
-            if location:
-                diagnosis["source_location"] = {"file": location["file"], "line": location["line"]}
-                diagnosis["source_location_note"] = f"Related {component} call site found by static pattern matching; review this location."
+            diagnosis["related_code_locations"] = [
+                {"file": item["file"], "line": item["line"], "component": component,
+                 "code_snippet": item.get("code_snippet", "")}
+                for item in ast_report.get("pipeline_locations", [])
+                if item.get("component") == component
+            ][:3]
+        diagnosis["code_references"] = _code_references_for_diagnosis(workspace, diagnosis, ast_report)
         if source == "local_log":
             diagnosis["log_location"] = {"file": log_report["latest_event"].get("file"), "line": log_report["latest_event"].get("line")}
 

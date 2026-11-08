@@ -43,6 +43,88 @@ def test_fastapi_diagnose_and_autotune_endpoints():
     assert tune_data["best_recommended"]["accuracy"] == 1.0
 
 
+def test_workspace_scanner_pins_chunk_step_that_ignores_overlap():
+    import tempfile
+    from pathlib import Path
+    from backend.app.diagnose.inspector import WorkspaceASTInspector
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / "src" / "ingestion" / "chunker.py"
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "class Chunker:\n"
+            "    def __init__(self, chunk_size=800, chunk_overlap=100):\n"
+            "        self.chunk_size = chunk_size\n"
+            "        self.chunk_overlap = chunk_overlap\n"
+            "    def split(self, text):\n"
+            "        step = self.chunk_size\n"
+            "        start = 0\n"
+            "        while start < len(text):\n"
+            "            yield text[start:start + self.chunk_size]\n"
+            "            start += step\n",
+            encoding="utf-8",
+        )
+        report = WorkspaceASTInspector().scan_workspace(str(root))
+
+    finding = next(warning for warning in report["static_warnings"] if "overlap is not applied" in warning["problem"])
+    assert Path(finding["file"]).as_posix() == "src/ingestion/chunker.py"
+    assert finding["line"] == 6
+    assert finding["root_cause"] == "CHUNKING"
+
+
+def test_workspace_scanner_finds_zero_uppercase_retrieval_limit_at_assignment():
+    import tempfile
+    from pathlib import Path
+    from backend.app.diagnose.inspector import WorkspaceASTInspector
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / "src" / "config.py"
+        source.parent.mkdir(parents=True)
+        source.write_text("TOP_K_RETRIEVAL: int = 0\n", encoding="utf-8")
+        report = WorkspaceASTInspector().scan_workspace(str(root))
+
+    finding = next(warning for warning in report["static_warnings"] if warning["root_cause"] == "RETRIEVAL")
+    assert Path(finding["file"]).as_posix() == "src/config.py"
+    assert finding["line"] == 1
+    assert "positive value" in finding["fix_suggestion"]
+
+
+def test_reranker_location_requires_matching_runtime_score_order():
+    import tempfile
+    from pathlib import Path
+    from backend.app.api.server import _runtime_correlated_reranker_sort
+
+    diagnosis = {
+        "root_cause": "RERANKER",
+        "expected_answer": "TARGET_ANSWER",
+        "runtime_parameters": {"top_k_final": 1},
+        "retrieved_chunks": [
+            {"text": "Distractor", "final_rank": 1, "pre_rerank_rank": 2, "rerank_score": 0.1},
+            {"text": "TARGET_ANSWER", "final_rank": 2, "pre_rerank_rank": 1, "rerank_score": 0.9},
+        ],
+    }
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        reranker = root / "reranker.py"
+        reranker.write_text(
+            "rescored = []\nrescored.sort(key=lambda item: item[1], reverse=False)\n",
+            encoding="utf-8",
+        )
+        reference = _runtime_correlated_reranker_sort(root, diagnosis)
+        assert reference is not None
+        assert Path(reference["file"]).as_posix() == "reranker.py"
+        assert reference["line"] == 2
+        assert reference["match_type"] == "runtime_score_order"
+
+        reranker.write_text(
+            "rescored = []\nrescored.sort(key=lambda item: item[0], reverse=False)\n",
+            encoding="utf-8",
+        )
+        assert _runtime_correlated_reranker_sort(root, diagnosis) is None
+
+
 if __name__ == "__main__":
     test_security_guard_redacts_secrets_and_pii()
     test_ast_workspace_inspector_finds_exact_file_and_line()

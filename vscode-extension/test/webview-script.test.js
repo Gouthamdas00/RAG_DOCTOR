@@ -158,8 +158,8 @@ test('dashboard and extension wire static and latest-run AI investigations local
     fix: null,
     verification: 'Assert that the generation prompt contains the retrieved context.',
   });
-  assert.match(agentTraceText, /Agent inspection: 3 local model turn\(s\); 2 read-only tool call\(s\) \(list_files, read_file\); reasoning enabled; one focused review checked the verifier finding/);
-  assert.match(agentTraceText, /Source excerpts provided: src\/prompts\.ts; files opened: src\/pipeline\.ts/);
+  assert.match(agentTraceText, /Agent inspection: 3 local model turn\(s\); 2 additional read-only tool call\(s\) \(list_files, read_file\); reasoning enabled; one focused review checked the verifier finding/);
+  assert.match(agentTraceText, /Source excerpts supplied to the investigator: src\/prompts\.ts; additional files opened: src\/pipeline\.ts/);
   const thinkingFallbackText = provider.formatInvestigation({
     status: 'insufficient_evidence',
     root_cause: 'UNKNOWN',
@@ -247,6 +247,7 @@ test('dashboard and extension wire static and latest-run AI investigations local
         testCase: { case_id: 'case-a', question: 'Question A', expected_answer: 'Answer A', gold_document_id: 'doc-a' },
         diagnosis: {
           root_cause: 'RETRIEVAL', status: 'needs_review', gold_document_retrieved: false, llm_answer: 'baseline answer A',
+          provider_call: { status: 'failed', provider: 'google', model: 'gemini-2.5-flash', error: 'http_404' },
           retrieved_chunks: [{ doc_id: 'old-doc', chunk_id: 'old-chunk', final_rank: 3, dense_score: 0.4, text: 'not copied into comparison' }],
         },
         appResponse: { answer: 'baseline answer A', latency_ms: 20 },
@@ -324,7 +325,7 @@ test('dashboard and extension wire static and latest-run AI investigations local
     assert.ok(postChangeRequests.filter((item) => item.route === '/api/evaluate-captured-run').every((item) => item.payload.expected_answer));
     const suiteVerification = verificationMessages.find((message) => message.type === 'suiteVerificationResult');
     assert.match(suiteVerification.text, /3\/3 labeled case\(s\) paired/);
-    assert.match(suiteVerification.text, /Reference-supported outcomes: 0\/3 → 3\/3/);
+    assert.match(suiteVerification.text, /Reference-supported outcomes \(requires answer and context evidence\): 0\/3 → 3\/3/);
     assert.match(suiteVerification.text, /Tracked source\/config files changed/);
     assert.match(suiteVerification.text, /exact replacement found at retriever\.py:1/);
     assert.match(suiteVerification.text, /exact replacement found at reranker\.py:1/);
@@ -351,6 +352,9 @@ test('dashboard and extension wire static and latest-run AI investigations local
     const reportHtml = evaluationPanel.webview.html;
     assert.match(reportHtml, /Replay labeled cases against current app/);
     assert.match(reportHtml, /Track this exact fix/);
+    assert.match(reportHtml, /Model provider call/);
+    assert.match(reportHtml, /gemini-2\.5-flash/);
+    assert.match(reportHtml, /HTTP 200 from the app does not prove/);
     assert.match(reportHtml, /verifyCurrentSuite/);
     const reportScript = reportHtml.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/);
     assert.ok(reportScript);

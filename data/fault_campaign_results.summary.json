@@ -1,0 +1,62 @@
+{
+  "runs": 800,
+  "fault_runs": 700,
+  "faults_detected_correctly": 700,
+  "fault_detection_rate": 1.0,
+  "healthy_controls": 100,
+  "healthy_false_positive_rate": 0.0,
+  "qwen_runs": 9,
+  "by_family": {
+    "GENERATOR_CONTEXT_DROPPED": {
+      "runs": 78,
+      "correct": 78,
+      "accuracy": 1.0
+    },
+    "GENERATOR_PROMPT_MISBINDING": {
+      "runs": 78,
+      "correct": 78,
+      "accuracy": 1.0
+    },
+    "CHUNKING_INVALID_OVERLAP": {
+      "runs": 78,
+      "correct": 78,
+      "accuracy": 1.0
+    },
+    "CHUNKING_NONPROGRESSING_LOOP": {
+      "runs": 78,
+      "correct": 78,
+      "accuracy": 1.0
+    },
+    "RANKING_ASCENDING_SIMILARITY": {
+      "runs": 78,
+      "correct": 78,
+      "accuracy": 1.0
+    },
+    "RETRIEVAL_TOPK_ZERO": {
+      "runs": 78,
+      "correct": 78,
+      "accuracy": 1.0
+    },
+    "RERANKER_SCORE_ASCENDING": {
+      "runs": 78,
+      "correct": 78,
+      "accuracy": 1.0
+    },
+    "CONTEXT_TRUNCATION": {
+      "runs": 77,
+      "correct": 77,
+      "accuracy": 1.0
+    },
+    "EVALUATOR_FALSE_PASS": {
+      "runs": 77,
+      "correct": 77,
+      "accuracy": 1.0
+    },
+    "HEALTHY_CONTROL": {
+      "runs": 100,
+      "correct": 100,
+      "accuracy": 1.0
+    }
+  },
+  "results_file": "C:\\Users\\H P\\Desktop\\rag doctor\\data\\fault_campaign_results.csv"
+}

@@ -10,6 +10,13 @@ function supported(diagnosis) {
   ));
 }
 
+function answerReferenceHit(diagnosis) {
+  const status = diagnosis && diagnosis.answer_reference_check && diagnosis.answer_reference_check.status;
+  if (status === 'numeric_value_present' || status === 'reference_phrase_present') return true;
+  if (status === 'numeric_value_not_found') return false;
+  return null;
+}
+
 function snapshotEvaluation(results, sourceFingerprint) {
   const cases = [];
   const items = results || [];
@@ -20,6 +27,7 @@ function snapshotEvaluation(results, sourceFingerprint) {
       rootCause: String(item.diagnosis.root_cause || ''),
       status: String(item.diagnosis.status || ''),
       supported: supported(item.diagnosis),
+      answerReferenceHit: answerReferenceHit(item.diagnosis),
       goldDocumentRetrieved: typeof item.diagnosis.gold_document_retrieved === 'boolean'
         ? item.diagnosis.gold_document_retrieved
         : null,
@@ -48,6 +56,8 @@ function compareSnapshots(previous, current) {
     if (afterCase) paired.push({ caseId, before: beforeCase, after: afterCase });
   }
   const count = (predicate) => paired.filter(predicate).length;
+  const beforeReferenceAssessed = paired.filter((item) => item.before.answerReferenceHit !== null).length;
+  const afterReferenceAssessed = paired.filter((item) => item.after.answerReferenceHit !== null).length;
   const beforeFingerprint = previous && previous.sourceFingerprint;
   const afterFingerprint = current && current.sourceFingerprint;
   let sourceChange = 'unavailable';
@@ -64,6 +74,10 @@ function compareSnapshots(previous, current) {
     afterCapturedCases: Number(current && current.capturedCases) || 0,
     beforeSupported: count((item) => item.before.supported),
     afterSupported: count((item) => item.after.supported),
+    beforeReferenceAssessed,
+    afterReferenceAssessed,
+    beforeReferenceObserved: count((item) => item.before.answerReferenceHit === true),
+    afterReferenceObserved: count((item) => item.after.answerReferenceHit === true),
     beforeGold: count((item) => item.before.goldDocumentRetrieved === true),
     afterGold: count((item) => item.after.goldDocumentRetrieved === true),
     beforeLatencyMs: meanLatency(paired.map((item) => item.before), 'latencyMs'),

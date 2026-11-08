@@ -253,7 +253,7 @@ class LocalAgentSafetyTests(unittest.TestCase):
             self.assertEqual(result["root_cause"], "RETRIEVAL")
             self.assertEqual(result["fix"]["file"], "src/retriever.py")
             self.assertTrue(result["fix"]["source_matches"])
-            self.assertEqual(result["fix"]["replacement_code"], "top_k = 5")
+            self.assertEqual(result["fix"]["replacement_code"], "top_k = 1")
             self.assertTrue(result["evidence"][0]["verified"])
 
     def test_verified_static_finding_source_is_given_to_local_model(self):
@@ -1000,7 +1000,7 @@ class LocalAgentSafetyTests(unittest.TestCase):
             self.assertEqual(models, ["test-local-model"] * 3)
             self.assertEqual(result["root_cause"], "RETRIEVAL")
             self.assertTrue(result["fix"]["source_matches"])
-            self.assertEqual(result["fix"]["replacement_code"], "top_k = 5")
+            self.assertEqual(result["fix"]["replacement_code"], "top_k = 1")
 
     def test_api_exposes_opt_in_agentic_investigation(self):
         from backend.app.api.server import AgentInvestigationRequest, agentic_investigate

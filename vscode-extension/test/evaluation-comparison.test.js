@@ -11,18 +11,18 @@ test('snapshots retain evaluation metrics but never retain prompts or answers', 
 
   assert.deepEqual(snapshot.cases, [{
     caseId: 'case-a', rootCause: 'NO_FAILURE', status: 'reference_supported', supported: true,
-    goldDocumentRetrieved: true, latencyMs: 12.5,
+    answerReferenceHit: null, goldDocumentRetrieved: true, latencyMs: 12.5,
   }]);
   assert.equal(JSON.stringify(snapshot).includes('private'), false);
 });
 
 test('compares paired cases and reports source edits separately from outcome changes', () => {
   const before = snapshotEvaluation([
-    { testCase: { case_id: 'a' }, diagnosis: { root_cause: 'RETRIEVAL', gold_document_retrieved: false }, appResponse: { latency_ms: 20 } },
-    { testCase: { case_id: 'b' }, diagnosis: { root_cause: 'NO_FAILURE', gold_document_retrieved: true }, appResponse: { latency_ms: 30 } },
+    { testCase: { case_id: 'a' }, diagnosis: { root_cause: 'RETRIEVAL', gold_document_retrieved: false, answer_reference_check: { status: 'numeric_value_not_found' } }, appResponse: { latency_ms: 20 } },
+    { testCase: { case_id: 'b' }, diagnosis: { root_cause: 'NO_FAILURE', gold_document_retrieved: true, answer_reference_check: { status: 'numeric_value_present' } }, appResponse: { latency_ms: 30 } },
   ], { digest: 'old', complete: true });
   const after = snapshotEvaluation([
-    { testCase: { case_id: 'a' }, diagnosis: { root_cause: 'NO_FAILURE', gold_document_retrieved: true }, appResponse: { latency_ms: 10 } },
+    { testCase: { case_id: 'a' }, diagnosis: { root_cause: 'NO_FAILURE', gold_document_retrieved: true, answer_reference_check: { status: 'numeric_value_present' } }, appResponse: { latency_ms: 10 } },
     { testCase: { case_id: 'b' }, diagnosis: { root_cause: 'NO_FAILURE', gold_document_retrieved: true }, appResponse: { latency_ms: null } },
     { testCase: { case_id: 'new' }, diagnosis: { root_cause: 'NO_FAILURE' }, appResponse: {} },
   ], { digest: 'new', complete: true });
@@ -31,6 +31,10 @@ test('compares paired cases and reports source edits separately from outcome cha
   assert.equal(result.pairedCount, 2);
   assert.equal(result.beforeSupported, 1);
   assert.equal(result.afterSupported, 2);
+  assert.equal(result.beforeReferenceAssessed, 2);
+  assert.equal(result.afterReferenceAssessed, 1);
+  assert.equal(result.beforeReferenceObserved, 1);
+  assert.equal(result.afterReferenceObserved, 1);
   assert.equal(result.beforeGold, 1);
   assert.equal(result.afterGold, 2);
   assert.equal(result.beforeLatencyMs, 25);

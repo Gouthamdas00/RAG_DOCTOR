@@ -1936,7 +1936,7 @@ def _runtime_similarity_order_finding(
 ) -> Optional[Dict[str, Any]]:
     """Correlate captured ranked scores with an ascending similarity sort in source."""
     diagnostics.update({
-        "runtime_ranking_checked": True,
+        "runtime_ranking_checked": False,
         "runtime_ranking_score_field": None,
         "runtime_ranking_candidate_count": 0,
         "runtime_ranking_mismatch_count": 0,
@@ -1961,6 +1961,7 @@ def _runtime_similarity_order_finding(
             continue
 
         diagnostics["runtime_ranking_score_field"] = score_field
+        diagnostics["runtime_ranking_checked"] = True
         for item in inventory[:MAX_LISTED_FILES]:
             relative = str(item.get("path") or "")
             if not relative.lower().endswith(".py"):
@@ -2068,13 +2069,14 @@ def _runtime_similarity_order_finding(
 
                 score_evidence = str(evidence.get("retrieval_summary") or "")
                 code_quote = current.strip()
+                ranking_cause = "RERANKER" if score_field == "rerank_score" else "RANKING_K"
                 return {
                     "status": "probable",
-                    "root_cause": "RANKING_K",
+                    "root_cause": ranking_cause,
                     "summary": (
                         f"The captured results are ordered from a lower {score_field} to a higher one, while this code sorts the "
-                        "similarity key in ascending order. Under the run's stated higher-is-better score semantics, the least "
-                        "similar result is placed first."
+                        f"{'reranker output' if ranking_cause == 'RERANKER' else 'retrieval candidates'} in ascending order. "
+                        "Under the run's stated higher-is-better score semantics, the lower-scoring result is placed first."
                     ),
                     "evidence": [
                         {"source": "runtime:retrieval_summary", "quote": score_evidence},
@@ -2094,6 +2096,100 @@ def _runtime_similarity_order_finding(
                         "suite and compare relevant-document recall, answer correctness, and latency."
                     ),
                 }
+    return None
+
+
+def _deterministic_invalid_retrieval_limit_finding(
+    workspace: Path,
+    diagnostics: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Catch explicit zero/negative top-k values without guessing optimal tuning."""
+    diagnostics.setdefault("invalid_retrieval_limit_candidates", 0)
+    pattern = re.compile(r"^(?P<prefix>\s*(?:TOP_K\w*|top_k)\s*=\s*)(?P<value>-\d+|0)(?P<suffix>\s*(?:#.*)?)$", re.I)
+    for item in _list_files_tool(workspace, {"path": "."}).get("files", []):
+        relative = str(item.get("path") or "")
+        if not relative.lower().endswith(".py"):
+            continue
+        try:
+            target = _inside_workspace(workspace, relative)
+            lines = target.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+        except (OSError, ValueError):
+            continue
+        for number, line in enumerate(lines, start=1):
+            match = pattern.match(line)
+            if not match:
+                continue
+            diagnostics["invalid_retrieval_limit_candidates"] += 1
+            value = int(match.group("value"))
+            replacement = f"{match.group('prefix')}1{match.group('suffix')}"
+            return {
+                "status": "probable",
+                "root_cause": "RETRIEVAL",
+                "summary": f"The configured retrieval top_k is {value}; it must be positive, so this setting can suppress all retrieved candidates.",
+                "evidence": [{"source": f"code:{relative}:{number}", "quote": line.strip()}],
+                "fix": {"file": relative, "line": number, "end_line": number, "current_code": line,
+                        "replacement_code": replacement, "proposed_change": "Set top_k to a positive value; 1 is the minimum valid value, not a quality-tuned recommendation.",
+                        "why": "A non-positive top_k cannot return a useful candidate set."},
+                "verification": "Run a query with a known relevant document and confirm retrieval returns at least one candidate; tune the value against a labeled set.",
+            }
+    return None
+
+
+def _deterministic_zero_context_truncation_finding(
+    workspace: Path,
+    diagnostics: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Identify a provable prompt-context cut to zero characters."""
+    diagnostics.setdefault("zero_context_truncation_candidates", 0)
+    for item in _list_files_tool(workspace, {"path": "."}).get("files", []):
+        relative = str(item.get("path") or "")
+        if not relative.lower().endswith(".py"):
+            continue
+        try:
+            target = _inside_workspace(workspace, relative)
+            source = target.read_text(encoding="utf-8-sig", errors="replace")
+            lines = source.splitlines()
+            tree = ast.parse(source, filename=relative)
+        except (OSError, ValueError, SyntaxError):
+            continue
+        for function in (node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
+            names = [arg.arg for arg in function.args.posonlyargs + function.args.args + function.args.kwonlyargs]
+            context_name = next((name for name in names if re.search(r"context|retriev|passage|document|chunk|\bdocs\b", name, re.I)), None)
+            if not context_name:
+                continue
+            for returned in (node for node in ast.walk(function) if isinstance(node, ast.Return) and node.value is not None):
+                for subscript in (node for node in ast.walk(returned.value) if isinstance(node, ast.Subscript)):
+                    bound = subscript.slice
+                    zero_slice = (
+                        isinstance(bound, ast.Slice)
+                        and bound.lower is None
+                        and bound.step is None
+                        and isinstance(bound.upper, ast.Constant)
+                        and bound.upper.value == 0
+                    ) or (isinstance(bound, ast.Constant) and bound.value == 0)
+                    if not zero_slice:
+                        continue
+                    context_names = {
+                        node.id for node in ast.walk(subscript.value)
+                        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+                    }
+                    if context_name not in context_names and not _expression_depends_on_parameter(function, subscript.value, context_name):
+                        continue
+                    line_no = subscript.lineno
+                    if not 1 <= line_no <= len(lines):
+                        continue
+                    line = lines[line_no - 1]
+                    diagnostics["zero_context_truncation_candidates"] += 1
+                    return {
+                        "status": "probable",
+                        "root_cause": "GENERATOR",
+                        "summary": f"`{function.name}` slices the context derived from `{context_name}` to zero characters before generation, so the model receives no retrieved context.",
+                        "evidence": [{"source": f"code:{relative}:{line_no}", "quote": line.strip()}],
+                        "fix": {"file": relative, "line": line_no, "end_line": line_no, "current_code": line,
+                                "replacement_code": "", "proposed_change": "Remove the zero-character slice and apply the application's configured, non-zero context budget instead.",
+                                "why": "A zero-length slice guarantees that no retrieved passage reaches the model."},
+                        "verification": "Build context from a distinctive marker passage and assert the marker survives context assembly and appears in the final model prompt.",
+                    }
     return None
 
 
@@ -2577,7 +2673,11 @@ def investigate_case(
     if static_finding is None and not evidence["runtime_capture_available"]:
         static_finding = _cross_file_retrieved_context_flow_finding(workspace, static_diagnostics)
     if static_finding is None and not evidence["runtime_capture_available"]:
+        static_finding = _deterministic_invalid_retrieval_limit_finding(workspace, static_diagnostics)
+    if static_finding is None and not evidence["runtime_capture_available"]:
         static_finding = _permissive_numeric_evaluator_finding(workspace, static_diagnostics)
+    if static_finding is None and static_prompt_check_ran:
+        static_finding = _deterministic_zero_context_truncation_finding(workspace, static_diagnostics)
     runtime_diagnostics: Dict[str, Any] = {}
     runtime_finding = (
         _runtime_similarity_order_finding(workspace, evidence, runtime_diagnostics)
@@ -2655,7 +2755,7 @@ def investigate_case(
             for key in ("status", "root_cause", "summary", "evidence", "fix", "verification")
         })
         task = (
-            "No runtime run was captured, so investigate the workspace statically. A deterministic source verifier found the candidate "
+            "No runtime run was captured, so perform a static audit of the workspace. A deterministic source verifier found the candidate "
             "below. Independently review the cited source and data flow; do not accept the candidate just because a verifier produced it. "
             "If the source proves the issue, report the same root-cause stage and cite the exact matching code. Provide a concrete fix "
             "only when its complete current source block and replacement are supported. If the candidate is wrong, explain the specific "

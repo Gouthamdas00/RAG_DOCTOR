@@ -2,7 +2,11 @@
   "name": "rag-doctor-vscode",
   "displayName": "RAG Doctor — Local Pipeline Inspector",
   "description": "Local VS Code diagnostics for RAG code, prompts, responses, and supported logs with evidence-linked fixes.",
-  "version": "2.4.64",
+  "version": "2.4.68",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Gouthamdas00/RAG_DOCTOR.git"
+  },
   "engines": {
     "vscode": "^1.80.0"
   },

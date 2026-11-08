@@ -58,6 +58,30 @@ class DeterministicStaticVerifierTests(unittest.TestCase):
         self._assert_grounded_fallback(result, "GENERATOR")
         self.assertIn("context", result["fix"]["replacement_code"].lower())
 
+    def test_zero_context_slice_is_reported_as_generator_fault(self):
+        result = self._investigate({
+            "src/generation.py": (
+                "def build_context(chunks):\n"
+                "    return '\\n'.join(chunk.text for chunk in chunks)[:0]\n"
+            ),
+        })
+        self.assertEqual(result["root_cause"], "GENERATOR", result)
+        self.assertEqual(result["status"], "probable")
+        self.assertEqual(result["fix"]["line"], 2)
+        self.assertIn("zero characters", result["summary"])
+
+    def test_nonpositive_top_k_is_reported_without_claiming_optimal_value(self):
+        result = self._investigate({
+            "src/config.py": (
+                "TOP_K_RETRIEVAL = 0\n"
+                "def retrieve(store, query):\n"
+                "    return store.search(query, top_k=TOP_K_RETRIEVAL)\n"
+            ),
+        })
+        self.assertEqual(result["root_cause"], "RETRIEVAL", result)
+        self.assertIn("minimum valid value", result["fix"]["proposed_change"])
+        self.assertIn("tune", result["verification"])
+
     def test_model_receives_a_specific_static_candidate_to_review(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
