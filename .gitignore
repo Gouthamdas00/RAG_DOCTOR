@@ -1,0 +1,28 @@
+# Python environments and generated files
+.venv/
+**/.venv/
+venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Local databases, test backups, and generated packages
+data/cache.db
+.test-backups/
+**/*.vsix
+vscode-extension/runtime/
+
+# Dependency and build output
+node_modules/
+**/node_modules/
+dist/
+build/
+
+# Accidental empty file in the extension folder
+/vscode-extension/,

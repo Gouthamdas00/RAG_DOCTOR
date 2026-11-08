@@ -1,0 +1,121 @@
+{
+  "name": "rag-doctor-vscode",
+  "displayName": "RAG Doctor — Local Pipeline Inspector",
+  "description": "Local VS Code diagnostics for RAG code, prompts, responses, and supported logs with evidence-linked fixes.",
+  "version": "2.4.64",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "activationEvents": [
+    "onView:ragDoctor.dashboard",
+    "onCommand:ragDoctor.openStudio",
+    "onCommand:ragDoctor.connectApp",
+    "onCommand:ragDoctor.runWithDoctor",
+    "onCommand:ragDoctor.scanWorkspace",
+    "onCommand:ragDoctor.showOutput"
+  ],
+  "main": "./extension.js",
+  "scripts": {
+    "test": "node --test",
+    "vscode:prepublish": "node scripts/stage-backend.js"
+  },
+  "extensionKind": ["workspace"],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Workspace scanning and app connection are available only after the workspace is trusted. RAG Doctor reads selected workspace files and can add a local connector file after confirmation."
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "ragDoctor.openStudio",
+        "title": "RAG Doctor: Open Local Diagnosis"
+      },
+      {
+        "command": "ragDoctor.scanWorkspace",
+        "title": "RAG Doctor: Scan Current Workspace"
+      },
+      {
+        "command": "ragDoctor.connectApp",
+        "title": "RAG Doctor: Connect App"
+      },
+      {
+        "command": "ragDoctor.runWithDoctor",
+        "title": "RAG Doctor: Run with Doctor"
+      },
+      {
+        "command": "ragDoctor.showOutput",
+        "title": "RAG Doctor: Show Output"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ragDoctor",
+          "title": "RAG Doctor",
+          "icon": "media/rag-doctor.svg"
+        }
+      ]
+    },
+    "views": {
+      "ragDoctor": [
+        {
+          "type": "webview",
+          "id": "ragDoctor.dashboard",
+          "name": "Workspace Diagnosis"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "RAG Doctor",
+      "properties": {
+        "ragDoctor.backendPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to a local RAG Doctor backend root containing backend/app/api/server.py. The packaged analyzer is used by default."
+        },
+        "ragDoctor.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Python executable with the analyzer dependencies installed. Defaults to a nearby .venv, then the system Python."
+        },
+        "ragDoctor.backendPort": {
+          "type": "number",
+          "default": 8765,
+          "minimum": 1024,
+          "maximum": 65535,
+          "description": "Loopback port for the local RAG Doctor analyzer."
+        },
+        "ragDoctor.includeRunContent": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include sanitized prompt, answer, and retrieved passage text in local diagnosis. Off by default; metadata-only analysis cannot verify factual correctness."
+        },
+        "ragDoctor.localModelEndpoint": {
+          "type": "string",
+          "default": "http://127.0.0.1:11434/api/chat",
+          "description": "Loopback-only Ollama-compatible chat endpoint used by the RAG investigator. Workspace evidence is never sent to a remote endpoint."
+        },
+        "ragDoctor.localModelName": {
+          "type": "string",
+          "default": "",
+          "description": "Installed local model name for AI investigation, for example qwen3:4b. The model runs in your local Ollama server."
+        },
+        "ragDoctor.localModelThinking": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Ollama reasoning for RAG investigations. Disable for faster responses or models that do not support thinking."
+        }
+      }
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "ragDoctor.scanWorkspace",
+          "group": "navigation"
+        }
+      ]
+    }
+  }
+}
